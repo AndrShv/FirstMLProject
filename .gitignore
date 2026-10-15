@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Test and coverage artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDEs and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs and local runtime files
+*.log
+*.pid
+celerybeat-schedule
+
+# ML/cache directories
+.cache/
+models/
+data/
+
+# Local Docker overrides
+docker-compose.override.yml

@@ -1,0 +1,22 @@
+# --- Web & API (FastAPI) ---
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+pydantic==2.9.2
+
+# --- Task Queue (Celery + RabbitMQ) ---
+celery==5.4.0
+kombu==5.4.2
+redis==5.1.1
+
+# --- Machine Learning & AI (PyTorch & Data) ---
+torch==2.4.1
+torchvision==0.19.1
+transformers==4.45.1
+huggingface-hub==0.25.1
+pandas==2.2.3
+numpy==2.1.1
+
+# --- Utilities & Environment ---
+pydantic-settings==2.5.0
+python-dotenv==1.0.1
+requests==2.32.3
