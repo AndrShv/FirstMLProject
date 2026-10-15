@@ -1,6 +1,5 @@
 import os
 from celery import Celery
-import workspace.worker
 
 
 RABBITMQ_URL = os.getenv('CELERY_BROKER_URL', 'amqp://guest:guest@localhost:5672//')
