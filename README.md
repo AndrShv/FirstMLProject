@@ -128,16 +128,30 @@ curl "http://localhost:8000/task_status/<task-id>"
 ```python
 import subprocess
 import time
+import threading
+import traceback
 import requests
+import uvicorn
+import os
 import sys
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from pyngrok import ngrok
+
+# === Чистим старые процессы ===
+os.system("pkill -9 -f uvicorn")
+os.system("pkill -9 -f vllm")
+ngrok.kill()
+time.sleep(3)
+
+NGROK_TOKEN = "3Bso9CD8XDewe5wRxdNSLmBF0EW_VxeqzyfAhuGm4Zkt8zt7"
+ngrok.set_auth_token(NGROK_TOKEN)
 
 VLLM_PORT = 8001
+WRAPPER_PORT = 5002
 model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
-os.system("pkill -9 -f vllm")
-time.sleep(2)
-
-# Запускаем vLLM с выводом в консоль Colab (не в фон)
+# === Запуск vLLM ===
 print(f"⏳ Запускаем vLLM на порту {VLLM_PORT}...")
 vllm_process = subprocess.Popen(
     [
@@ -147,40 +161,103 @@ vllm_process = subprocess.Popen(
         "--dtype", "float16"
     ],
     stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,  # stderr → stdout вместе
+    stderr=subprocess.STDOUT,
     text=True,
     bufsize=1
 )
 
-# Читаем вывод vLLM в реальном времени
 def stream_vllm_logs():
     for line in vllm_process.stdout:
         print(f"[vLLM] {line}", end="")
 
-import threading
 threading.Thread(target=stream_vllm_logs, daemon=True).start()
 
-# Ждём готовности
+# === Ждём готовности vLLM ===
 start = time.time()
-while time.time() - start < 180:
-    # Проверяем — не упал ли процесс
+while time.time() - start < 300:
     if vllm_process.poll() is not None:
-        print(f"\n❌ vLLM процесс завершился с кодом: {vllm_process.returncode}")
+        print(f"\n❌ vLLM упал с кодом: {vllm_process.returncode}")
         sys.exit(1)
     try:
         r = requests.get(f"http://localhost:{VLLM_PORT}/health", timeout=2)
         if r.status_code == 200:
-            print(f"\n✅ vLLM готов!")
+            print(f"\n✅ vLLM готов на порту {VLLM_PORT}!")
             break
     except requests.exceptions.ConnectionError:
         pass
     time.sleep(5)
 else:
-    print("❌ Таймаут — vLLM не поднялся за 3 минуты")
+    print("❌ Таймаут")
     vllm_process.kill()
     sys.exit(1)
+
+# === FastAPI wrapper ===
+app = FastAPI(title="Colab AI Wrapper")
+
+class GenerationRequest(BaseModel):
+    prompt: str
+    max_new_tokens: int = 100
+
+@app.post("/generate-cloud")
+def cloud_generate(req: GenerationRequest):
+    try:
+        response = requests.post(
+            f"http://localhost:{VLLM_PORT}/v1/chat/completions",
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": req.prompt}],
+                "max_tokens": req.max_new_tokens,
+                "temperature": 0.7
+            },
+            timeout=60
+        )
+        if response.status_code != 200:
+            raise Exception(f"vLLM error {response.status_code}: {response.text}")
+
+        answer = response.json()["choices"][0]["message"]["content"]
+        return {"prompt": req.prompt, "response": answer}
+
+    except Exception as e:
+        print("❌ Ошибка:\n", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+def run_server():
+    uvicorn.run(app, host="0.0.0.0", port=WRAPPER_PORT, log_level="warning")
+
+threading.Thread(target=run_server, daemon=True).start()
+time.sleep(2)
+
+# === ngrok туннель ===
+public_url = ngrok.connect(WRAPPER_PORT)
+new_cloud_url = f"{public_url.public_url}/generate-cloud"
+
+print("🚀 Всё запущено!")
+print(f"👉 СКОПИРУЙ В ai_service.py:\n{new_cloud_url}")
 ```
 
+
+
+```python
+import os
+import time
+import subprocess
+
+# Убиваем всё что держит GPU
+os.system("fuser -k /dev/nvidia0")
+os.system("fuser -k /dev/nvidiactl")
+os.system("pkill -9 -f vllm")
+time.sleep(3)
+
+# Проверяем что VRAM освободилась
+result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+print(result.stdout)
+```
+
+```python
+import subprocess
+result = subprocess.run(['fuser', '-v', '/dev/nvidia0'], capture_output=True, text=True)
+print(result.stderr)  # покажет PID процессов на GPU
+```
 ## Переменные окружения
 
 Локальный RabbitMQ по умолчанию:

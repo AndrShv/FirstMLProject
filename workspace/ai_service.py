@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 CLOUD_URL = "https://knox-exopoditic-azalea.ngrok-free.dev/generate-cloud"
 
 
-def generate_text(prompt: str, max_new_tokens: int = 100) -> str | None:
+def generate_text(prompt: str, max_new_tokens: int = 500) -> str | None:
     try:
         response = requests.post(
             CLOUD_URL,

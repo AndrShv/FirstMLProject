@@ -19,7 +19,7 @@ def read_root():
 
 
 @generator_router.post("/generate")
-def generate_text(prompt: str, max_new_tokens: int = 100):
+def generate_text(prompt: str, max_new_tokens: int = 500):
     logger.info(f"Generating text for prompt: {prompt}")
 
     new_task = generating_method.delay(prompt, max_new_tokens)
