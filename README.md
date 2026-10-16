@@ -126,54 +126,59 @@ curl "http://localhost:8000/task_status/<task-id>"
 Сначала выполните ячейку установки зависимостей, затем этот код:
 
 ```python
-import threading
+import subprocess
+import time
+import requests
+import sys
 
-import torch
-import uvicorn
-from fastapi import FastAPI
-from google.colab import userdata
-from pyngrok import ngrok
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-token = userdata.get("NGROK_AUTHTOKEN")
-if not token:
-    raise RuntimeError("Создайте Colab Secret NGROK_AUTHTOKEN")
-ngrok.set_auth_token(token)
-
-app = FastAPI(title="Colab AI Inference Node")
+VLLM_PORT = 8001
 model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
-print("⏳ Загружаем модель на GPU в Google Colab...")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype=torch.float16,
-    device_map="auto",
+os.system("pkill -9 -f vllm")
+time.sleep(2)
+
+# Запускаем vLLM с выводом в консоль Colab (не в фон)
+print(f"⏳ Запускаем vLLM на порту {VLLM_PORT}...")
+vllm_process = subprocess.Popen(
+    [
+        "python3", "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model_name,
+        "--port", str(VLLM_PORT),
+        "--dtype", "float16"
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,  # stderr → stdout вместе
+    text=True,
+    bufsize=1
 )
-print("✅ Модель успешно загружена на GPU!")
 
-@app.post("/generate-cloud")
-def cloud_generate(prompt: str, max_new_tokens: int = 100):
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.7,
-        )
-    return {
-        "prompt": prompt,
-        "response": tokenizer.decode(outputs[0], skip_special_tokens=True),
-    }
+# Читаем вывод vLLM в реальном времени
+def stream_vllm_logs():
+    for line in vllm_process.stdout:
+        print(f"[vLLM] {line}", end="")
 
-def run_server():
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+import threading
+threading.Thread(target=stream_vllm_logs, daemon=True).start()
 
-threading.Thread(target=run_server, daemon=True).start()
-public_url = ngrok.connect(5000)
-print("🚀 Cloud AI server is running")
-print(f"👉 {public_url}/generate-cloud")
+# Ждём готовности
+start = time.time()
+while time.time() - start < 180:
+    # Проверяем — не упал ли процесс
+    if vllm_process.poll() is not None:
+        print(f"\n❌ vLLM процесс завершился с кодом: {vllm_process.returncode}")
+        sys.exit(1)
+    try:
+        r = requests.get(f"http://localhost:{VLLM_PORT}/health", timeout=2)
+        if r.status_code == 200:
+            print(f"\n✅ vLLM готов!")
+            break
+    except requests.exceptions.ConnectionError:
+        pass
+    time.sleep(5)
+else:
+    print("❌ Таймаут — vLLM не поднялся за 3 минуты")
+    vllm_process.kill()
+    sys.exit(1)
 ```
 
 ## Переменные окружения
