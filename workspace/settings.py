@@ -1,6 +1,6 @@
+from pathlib import Path
 from typing import Optional, Any
 
-from fastapi import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]
