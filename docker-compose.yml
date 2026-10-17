@@ -7,15 +7,24 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
-    restart: always
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
       interval: 5s
       timeout: 5s
       retries: 3
+    deploy:
+        resources:
+            limits:
+              cpus: '0.5'
+              memory: 512M
+            reservations:
+              cpus: '0.25'
+              memory: 256M
 
   worker:
     build: .
+    restart: unless-stopped
     container_name: celery_worker
     command: celery -A workspace.celery_cfg:celery_app worker --loglevel=info
     volumes:
@@ -25,3 +34,27 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+    deploy:
+        resources:
+            limits:
+              cpus: '0.5'
+              memory: 512M
+            reservations:
+              cpus: '0.25'
+              memory: 256M
+
+  redis:
+    restart: unless-stopped
+    image: redis:alpine
+    container_name: redis_cache
+    ports:
+      - "6379:6379"
+    deploy:
+        resources:
+            limits:
+              cpus: '0.5'
+              memory: 256M
+            reservations:
+              cpus: '0.25'
+              memory: 256M
+
