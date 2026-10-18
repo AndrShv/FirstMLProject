@@ -1,13 +1,9 @@
-import os
 from celery import Celery
-import workspace.worker
 
-
-RABBITMQ_URL = os.getenv('CELERY_BROKER_URL', 'amqp://guest:guest@localhost:5672//')
-
+from workspace.configs.settings import Settings
 celery_app = Celery(
     'tasks',
-    broker=RABBITMQ_URL,
+    broker=Settings.RABBITMQ_URL,
     backend='rpc://',
     include=['workspace.worker'],
 )
