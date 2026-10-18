@@ -27,13 +27,15 @@ services:
     restart: unless-stopped
     container_name: celery_worker
     working_dir: /app
-    command: celery -A workspace.celery_cfg:celery_app worker --loglevel=info
+    command: celery -A workspace.configs.celery_cfg:celery_app worker --loglevel=info
     volumes:
       - .:/app
     environment:
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
       - ENV_FILE=proprts.env
       - PYTHONPATH=/app
+      - REDIS_HOST=redis
     depends_on:
       rabbitmq:
         condition: service_healthy

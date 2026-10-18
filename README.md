@@ -48,7 +48,7 @@ ngrok.set_auth_token(userdata.get("NGROK_AUTHTOKEN"))
 3. Выполните ячейку установки:
 
 ```python
-!pip install -q fastapi uvicorn transformers torch accelerate pyngrok
+!pip install -q fastapi uvicorn transformers torch accelerate pyngrok vllm 
 ```
 
 4. Выполните код из раздела [Код Colab](#код-colab).
