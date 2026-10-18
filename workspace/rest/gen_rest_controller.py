@@ -1,9 +1,9 @@
 import logging
 
+from workspace.configs.celery_cfg import celery_app
+from workspace.services.worker import generating_method
 from celery.result import AsyncResult
 from fastapi import APIRouter
-from workspace.celery_cfg import celery_app
-from workspace.worker import generating_method
 generator_router = APIRouter()
 
 logging.basicConfig(
