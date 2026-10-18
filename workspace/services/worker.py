@@ -3,7 +3,7 @@ import hashlib
 import logging
 from datetime import timezone, datetime
 from workspace.configs.celery_cfg import celery_app
-from workspace.configs.db_config import _get_session_factory
+from workspace.configs.db_config import _get_session_factory, init_db
 from workspace.configs.settings import settings
 from workspace.entity.db_models import DbOutputs
 from workspace.helpers.time_logger import count_latency
@@ -17,18 +17,22 @@ redis_client = Redis.from_url(settings.redis_url, decode_responses=False)
 cache_service = AiCacheService(redis_client)
 logger = logging.getLogger(__name__)
 
+
 async def save_output_to_db(prompt: str, response_text: str, api_result: dict, cache_hit: bool):
-    async with _get_session_factory() as session:
-         saved_output = DbOutputs(
-             timestamp=datetime.now(timezone.utc),
-             prompt=prompt,
-             response=response_text,
-             latency=api_result.get("latency", 0.0),
-             input_tokens=api_result["input_tokens"],
-             output_tokens=api_result["output_tokens"],
-             cache_hit=cache_hit
-            )
-    await output_repo.OutputRepository.save_output(saved_output)
+    await init_db()
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        repo = output_repo.OutputRepository(session)
+        saved_output = DbOutputs(
+            timestamp=datetime.now(timezone.utc),
+            prompt=prompt,
+            response=response_text,
+            latency=api_result.get("latency", 0.0),
+            input_tokens=api_result.get("input_tokens", 0),
+            output_tokens=api_result.get("output_tokens", 0),
+            cache_hit=cache_hit
+        )
+        await repo.save_output(saved_output)
 
 
 async def process_generation_with_cache(prompt: str, max_new_tokens: int) -> str:
@@ -56,13 +60,13 @@ async def process_generation_with_cache(prompt: str, max_new_tokens: int) -> str
 
 
     logger.info(f"Saving output to DB for prompt: {prompt}")
-    await save_output_to_db(prompt, response_text, api_result, cache_hit=True)
+    await save_output_to_db(prompt, response_text, api_result, cache_hit=False)
     await cache_service.save_data(prompt, cache_payload)
     logger.info(f"Saving output to DB for prompt: {prompt}")
     return response_text
 
 
-@count_latency
 @celery_app.task(name="workspace.worker.generating_method")
+@count_latency
 def generating_method(prompt: str, max_new_tokens: int = 100):
     return asyncio.run(process_generation_with_cache(prompt, max_new_tokens))

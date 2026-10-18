@@ -4,7 +4,9 @@ from workspace.configs.settings import settings
 celery_app = Celery(
     'tasks',
     broker=settings.rabbitmq_url,
-    backend='rpc://',
+    # RPC results are kept in a temporary reply queue and cannot reliably be
+    # read by a later HTTP request. Redis is shared by the API and workers.
+    backend=settings.celery_result_backend,
     include=['workspace.services.worker'],
 )
 

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -35,9 +33,13 @@ services:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
       - ENV_FILE=proprts.env
       - PYTHONPATH=/app
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_SSL=false
       - REDIS_HOST=redis
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     deploy:
       resources:
@@ -75,6 +77,11 @@ services:
       POSTGRES_PASSWORD: 1111
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d ml_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes:
       - postgres_data:/var/lib/postgresql/data
     deploy:

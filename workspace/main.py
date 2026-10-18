@@ -1,9 +1,12 @@
 import logging
 import os
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 import uvicorn
 from workspace.configs.settings import settings
+from workspace.configs.db_config import init_db
 from workspace.rest.generator_controller import generator_router
 
 log_level = os.getenv("LOG_LEVEL", settings.LOG_LEVEL).upper()
@@ -15,7 +18,13 @@ logging.basicConfig(
 )
 
 
-app = FastAPI(title="AI Microservice Starter")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await init_db()
+    yield
+
+
+app = FastAPI(title="AI Microservice Starter", lifespan=lifespan)
 app.include_router(generator_router)
 
 if __name__ == "__main__":

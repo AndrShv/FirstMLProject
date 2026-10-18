@@ -1,8 +1,11 @@
 import logging
+
+from celery.result import AsyncResult
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from workspace.configs.celery_cfg import celery_app
 from workspace.configs.db_config import get_db
+from workspace.dto.ai_requests import GeneratingRequest
 from workspace.repo import output_repo
 from workspace.services.worker import generating_method
 generator_router = APIRouter()
@@ -14,16 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 @generator_router.post("/generate")
-def generate_text(prompt: str, max_new_tokens: int = 500):
-    logger.info(f"Generating text for prompt: {prompt}")
+def generate_text(data: GeneratingRequest):
+    logger.info(f"Generating text for prompt: {data.prompt}")
 
-    new_task = generating_method.delay(prompt, max_new_tokens)
+    new_task = generating_method.delay(data.prompt, data.max_new_tokens)
 
 
     logger.info(f"Task dispatched with ID: {new_task.id}")
     return {
         "status": "queued",
-        "prompt": prompt,
+        "prompt": data.prompt,
         "task_id": new_task.id,
         "detail": "Task has been accepted for processing by Celery worker.",
     }
@@ -35,3 +38,11 @@ async def get_stats(session: AsyncSession = Depends(get_db)):
     output_statistics = await output_repo.OutputRepository(session).get_stats()
     return output_statistics
 
+@generator_router.get("/task/{task_id}")
+async def get_task_status(task_id: str):
+    task_result = AsyncResult(task_id, app=celery_app)
+    return {
+        "task_id": task_id,
+        "status": task_result.status,
+        "result": task_result.result if task_result.ready() else None
+    }
