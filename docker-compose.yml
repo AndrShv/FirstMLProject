@@ -7,21 +7,85 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
-    restart: always
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
       interval: 5s
       timeout: 5s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   worker:
     build: .
+    restart: unless-stopped
     container_name: celery_worker
-    command: celery -A workspace.celery_cfg:celery_app worker --loglevel=info
+    working_dir: /app
+    command: celery -A workspace.configs.celery_cfg:celery_app worker --loglevel=info
     volumes:
       - .:/app
     environment:
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+      - ENV_FILE=proprts.env
+      - PYTHONPATH=/app
+      - REDIS_HOST=redis
     depends_on:
       rabbitmq:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  redis:
+    restart: unless-stopped
+    image: redis:alpine
+    container_name: redis_cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: shop-postgres
+    environment:
+      POSTGRES_DB: ml_service
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: 1111
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+        resources:
+            limits:
+              cpus: '0.5'
+              memory: 512M
+            reservations:
+              cpus: '0.25'
+              memory: 256M
+
+volumes:
+  postgres_data:
+  redis_data:
