@@ -1,10 +1,9 @@
 import logging
 
+from workspace.configs.celery_cfg import celery_app
+from workspace.services.worker import generating_method
 from celery.result import AsyncResult
 from fastapi import APIRouter
-from workspace.worker import generate_key_in_range
-from workspace.celery_cfg import celery_app
-
 generator_router = APIRouter()
 
 logging.basicConfig(
@@ -20,10 +19,10 @@ def read_root():
 
 
 @generator_router.post("/generate")
-def generate_text(prompt: str, start: int, end: int):
+def generate_text(prompt: str, max_new_tokens: int = 500):
     logger.info(f"Generating text for prompt: {prompt}")
 
-    new_task = generate_key_in_range.delay(x=start, y=end)
+    new_task = generating_method.delay(prompt, max_new_tokens)
 
 
     logger.info(f"Task dispatched with ID: {new_task.id}")
