@@ -3,7 +3,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
-from workspace.settings import settings
+from workspace.configs.settings import Settings
 
 
 class Base(DeclarativeBase):
@@ -11,8 +11,8 @@ class Base(DeclarativeBase):
 
 
 async_engine = create_async_engine(
-    settings.Settings.DATABASE_URL,
-    echo=settings.Settings.DEBUG,
+    Settings.DATABASE_URL,
+    echo=Settings.DEBUG,
     pool_size=10,
     max_overflow=20,
     connect_args={

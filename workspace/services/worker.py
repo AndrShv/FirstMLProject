@@ -1,6 +1,6 @@
 
-from workspace.celery_cfg import celery_app
-from workspace.ai_service import generate_text
+from workspace.configs.celery_cfg import celery_app
+from workspace.services.ai_service import generate_text
 
 
 @celery_app.task(name="workspace.worker.generating_method")

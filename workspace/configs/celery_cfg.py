@@ -1,10 +1,9 @@
 from celery import Celery
-from workspace.settings import settings
 
-
+from workspace.configs.settings import Settings
 celery_app = Celery(
     'tasks',
-    broker=settings.rabbitmq_url,
+    broker=Settings.RABBITMQ_URL,
     backend='rpc://',
     include=['workspace.worker'],
 )
