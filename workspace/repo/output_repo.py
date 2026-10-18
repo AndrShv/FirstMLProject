@@ -1,7 +1,7 @@
-from select import select
 from typing import Optional
 from uuid import UUID
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from workspace.entity.db_models import DbOutputs
@@ -27,11 +27,11 @@ class OutputRepository:
 
 
     async def count_all_outputs(self) -> int:
-        result = await self.session.scalar(select(DbOutputs).count())
+        result = await self.session.scalar(select(func.count()).select_from(DbOutputs))
         return result or 0
 
     async def count_avg_latency(self) -> Optional[float]:
-        result = await self.session.scalar(select(DbOutputs).with_only_columns([DbOutputs.latency]).avg())
+        result = await self.session.scalar(select(func.avg(DbOutputs.latency)))
         return result
 
 
@@ -49,6 +49,7 @@ class OutputRepository:
         total_outputs = await self.count_all_outputs()
         if total_outputs == 0:
             return 0.0
-        cache_hits_query = select(DbOutputs).where(DbOutputs.cache_hit == True)
-        cache_hits_count = await self.session.scalar(cache_hits_query.count())
+        cache_hits_count = await self.session.scalar(
+            select(func.count()).select_from(DbOutputs).where(DbOutputs.cache_hit.is_(True))
+        )
         return (cache_hits_count / total_outputs) * 100

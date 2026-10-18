@@ -1,9 +1,11 @@
 import logging
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from workspace.configs.db_config import get_db
 from workspace.repo import output_repo
 from workspace.services.worker import generating_method
-from fastapi import APIRouter
 generator_router = APIRouter()
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -28,8 +30,8 @@ def generate_text(prompt: str, max_new_tokens: int = 500):
 
 
 @generator_router.post("/stats")
-def get_stats():
+async def get_stats(session: AsyncSession = Depends(get_db)):
     logger.info(f"Generating stats for requests")
-    output_statistics = output_repo.OutputRepository.get_stats()
+    output_statistics = await output_repo.OutputRepository(session).get_stats()
     return output_statistics
 

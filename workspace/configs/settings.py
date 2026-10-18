@@ -3,16 +3,18 @@ from typing import Optional, Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ENV_PATH = BASE_DIR / "proprts.env"
+
 
 class Settings(BaseSettings):
     DEBUG: bool = False
     PROJECT_NAME: str = "ML Service Example"
     PORT: int = 8001
     LOG_LEVEL: str = "INFO"
+
     model_config = SettingsConfigDict(
-        env_file=("proprts.env", ENV_PATH),
+        env_file=("proprts.env", str(ENV_PATH)),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -22,7 +24,7 @@ class Settings(BaseSettings):
     POSTGRES_PASSWORD: str = ""
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "outfitiq"
+    POSTGRES_DB: str = "ml_service"
     DATABASE_URL: Optional[str] = None
 
     @property
@@ -31,12 +33,14 @@ class Settings(BaseSettings):
             url = self.DATABASE_URL
             if url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            if "?ssl=disable" not in url and "localhost" in url:
+                url += "?ssl=disable"
             return url
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            f"?ssl=disable"
         )
-
 
     # --- RabbitMQ ---
     CLOUDAMQP_URL: Optional[str] = None
@@ -48,11 +52,10 @@ class Settings(BaseSettings):
     MAIN_QUEUE_NAME: str = "ml.queue.main.queue"
 
     @property
-    def rabbitmq_url(self) -> str | None | Any:
-        if getattr(self, "CLOUDAMQP_URL", None):
+    def rabbitmq_url(self) -> str:
+        if self.CLOUDAMQP_URL:
             return self.CLOUDAMQP_URL
-
-        if getattr(self, "RABBITMQ_URL", None):
+        if self.RABBITMQ_URL:
             return self.RABBITMQ_URL
 
         auth = ""
@@ -61,10 +64,8 @@ class Settings(BaseSettings):
 
         return f"amqp://{auth}{self.RABBIT_HOST}:{self.RABBIT_PORT}/"
 
-
-
     # --- Redis ---
-    REDIS_HOST: Optional[str] = None
+    REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: Optional[str] = None
 
