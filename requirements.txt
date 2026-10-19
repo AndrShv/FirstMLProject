@@ -8,15 +8,20 @@ celery==5.4.0
 kombu==5.4.2
 redis==5.1.1
 
-# --- Machine Learning & AI (PyTorch & Data) ---
+# --- Machine Learning & AI (Data & Client) ---
 torch==2.4.1
 torchvision==0.19.1
 transformers==4.45.1
 huggingface-hub==0.25.1
 pandas==2.2.3
 numpy==2.1.1
-
+accelerate
+pyngrok
+openai
+protobuf
 # --- Utilities & Environment ---
 pydantic-settings==2.5.0
+sqlalchemy==2.0.36
+asyncpg==0.30.0
 python-dotenv==1.0.1
 requests==2.32.3
