@@ -77,7 +77,6 @@ class Settings(BaseSettings):
 
     @property
     def celery_result_backend(self) -> str:
-        """Shared result storage for API and Celery workers."""
         scheme = "rediss" if self.REDIS_PASSWORD and self.REDIS_HOST not in {"localhost", "127.0.0.1", "redis"} else "redis"
         if self.REDIS_PASSWORD:
             return f"{scheme}://default:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/1"
