@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from workspace.entity.db_models import DbOutputs
@@ -36,13 +36,26 @@ class OutputRepository:
 
 
     async def get_stats(self) -> dict:
-        total_outputs = await self.count_all_outputs()
-        avg_latency = await self.count_avg_latency()
-        cache_hits = await self.count_percentage_of_cache_hits()
+        stats = await self.session.execute(
+            select(
+                func.count(DbOutputs.id).label("total_outputs"),
+                func.avg(DbOutputs.latency).label("avg_latency"),
+                func.coalesce(
+                    func.sum(case((DbOutputs.cache_hit.is_(True), 1), else_=0)),
+                    0,
+                ).label("cache_hits_count"),
+            )
+        )
+        row = stats.one()
+        total_outputs = row.total_outputs or 0
+        avg_latency = row.avg_latency
+        cache_hits_count = row.cache_hits_count or 0
+
         return {
             "total_outputs": total_outputs,
-            "avg_latency": avg_latency,
-            "cache_hits": cache_hits
+            "avg_latency": float(avg_latency) if avg_latency is not None else None,
+            "cache_hits": (cache_hits_count / total_outputs) * 100
+            if total_outputs else 0.0,
         }
 
     async def count_percentage_of_cache_hits(self):

@@ -72,7 +72,10 @@ async def process_generation_with_cache(prompt: str, max_new_tokens: int) -> str
     return response_text
 
 
-@celery_app.task(name="workspace.worker.generating_method")
+@celery_app.task(name="workspace.worker.generating_method", bind=True)
 @count_latency
-def generating_method(prompt: str, max_new_tokens: int = 100):
-    return asyncio.run(process_generation_with_cache(prompt, max_new_tokens))
+def generating_method(self, prompt: str, max_new_tokens: int = 100):
+    try:
+        return asyncio.run(process_generation_with_cache(prompt, max_new_tokens))
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=60)
