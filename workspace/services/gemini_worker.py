@@ -1,31 +1,38 @@
-import asyncio
 import json
 import logging
-from typing import Any
-
+from typing import List
 from google import genai
-from workspace.configs.celery_cfg import celery_app
 from workspace.configs.settings import settings
-from workspace.dto.ai_requests import AiRequest
 from workspace.helpers.cleaners import clean_json
-from workspace.helpers.time_logger import count_latency
 
 GEMINI_MODEL = "gemini-2.5-flash"
 logger = logging.getLogger(__name__)
 
 
-async def gemini_request(prompt: str, generated: str, reference: str) -> dict[Any, Any]:
-    global e
-    judge_prompt = f"""
-    Оцени ответ, сгенерированный моделью, по сравнению с эталоном.
-    Промпт: {prompt}
-    Эталон (Ground Truth): {reference}
-    Ответ модели: {generated}
+async def gemini_batch_request(batch_items: List[dict]) -> List[dict]:
+    formatted_items = ""
+    for idx, item in enumerate(batch_items, 1):
+        formatted_items += f"""
+---
+Элемент #{idx}:
+Промпт: {item['prompt']}
+Эталон (Ground Truth): {item['reference']}
+Ответ модели: {item['generated']}
+"""
 
-    Дай оценку от 1 до 5 и краткое объяснение.
-    ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (без markdown-оберток):
-    {{"score": 5, "reason": "..."}}
-    """
+    judge_prompt = f"""
+Ты строгий и объективный AI-судья. Оцени пачку ответов, сгенерированных локальной моделью, по сравнению с эталонами.
+Для каждого элемента дай оценку от 1 до 5 и краткое объяснение.
+
+{formatted_items}
+
+ОТВЕТЬ СТРОГО В ВИДЕ JSON-МАССИВА (без markdown-оберток ```json ... ```, чистый массив):
+[
+  {{"index": 1, "score": 5, "reason": "..."}},
+  {{"index": 2, "score": 3, "reason": "..."}}
+]
+"""
+
     try:
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
         response = await client.aio.models.generate_content(
@@ -34,26 +41,26 @@ async def gemini_request(prompt: str, generated: str, reference: str) -> dict[An
         )
 
         raw_text = response.text.strip()
-
         cleaned_text = await clean_json(raw_text)
 
         result = json.loads(cleaned_text)
-        return {
-            "score": int(result.get("score", 1)),
-            "reason": result.get("reason", "Не удалось распарсить причину")
-        }
-    except Exception as e:
-        logger.error(f"Ошибка при запросе к Gemini: {e}")
-    return {
-        "score": 1,
-        "reason": f"Ошибка запроса: {str(e)}"
-    }
 
+        evaluated_map = {}
+        for res in result:
+            idx = int(res.get("index", 0))
+            evaluated_map[idx] = {
+                "score": int(res.get("score", 1)),
+                "reason": res.get("reason", "Не удалось распарсить причину")
+            }
 
-@celery_app.task(name="workspace.worker.generating_method", bind=True)
-@count_latency
-def make_ai_request(self, data: AiRequest):
-    try:
-        asyncio.run(gemini_request(data.prompt, data.generated, data.reference))
+        final_results = []
+        for i in range(1, len(batch_items) + 1):
+            if i in evaluated_map:
+                final_results.append(evaluated_map[i])
+            else:
+                final_results.append({"score": 1, "reason": "Пропущено в ответе судьи"})
+        return final_results
+
     except Exception as e:
-        self.retry(exc=e, countdown=60)
+        logger.error(f"Ошибка при пакетном запросе к Gemini: {e}")
+        return [{"score": 1, "reason": f"Ошибка запроса батча: {str(e)}"} for _ in batch_items]
