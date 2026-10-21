@@ -4,12 +4,13 @@ import logging
 from pathlib import Path
 from celery.result import AsyncResult
 from workspace.configs.celery_cfg import celery_app
-from workspace.services.gemini_worker import gemini_request
+from workspace.services.gemini_worker import gemini_batch_request
 from workspace.services.worker import generating_method
 
 logger = logging.getLogger(__name__)
 DATASET_PATH = Path(__file__).resolve().parents[2] / "dataset_for_training.json"
 REPORT_PATH = Path(__file__).resolve().parents[2] / "eval_report.json"
+BATCH_SIZE = 10
 
 
 
@@ -24,51 +25,65 @@ async def evaluate():
     results = []
     avg_score = None
 
+    valid_items = []
     for idx, item in enumerate(data, 1):
         prompt = item.get("prompt") or item.get("instruction")
         ground_truth = item.get("ground_truth") or item.get("output")
-
         if not prompt or not ground_truth:
             print(f"[{idx}] Пропуск: не найден prompt или ground_truth в элементе.")
             continue
+        valid_items.append({"prompt": prompt, "reference": ground_truth})
 
-        print(f"[{idx}/{len(data)}] Отправка промпта: {prompt}")
+    for batch_start in range(0, len(valid_items), BATCH_SIZE):
+        batch = valid_items[batch_start:batch_start + BATCH_SIZE]
+        print(f"\nПачка {batch_start // BATCH_SIZE + 1}: отправка {len(batch)} запросов в локальный ИИ")
 
-        try:
-            task = generating_method.delay(prompt, 300)
-        except Exception as e:
-            print(f"Ошибка постановки задачи в Celery: {e}")
-            continue
+        tasks = []
+        for item in batch:
+            print(f"Отправка промпта: {item['prompt']}")
+            try:
+                tasks.append(generating_method.delay(item["prompt"], 300))
+            except Exception as e:
+                print(f"Ошибка постановки задачи в Celery: {e}")
+                tasks.append(None)
 
-        generated_text = None
+        generated_items = []
+        pending = {task.id: (position, task) for position, task in enumerate(tasks) if task}
         for _ in range(30):
             await asyncio.sleep(1)
-            try:
-                task_result = AsyncResult(task.id, app=celery_app)
-                if task_result.successful():
-                    generated_text = task_result.result
-                    break
-                elif task_result.failed():
-                    print(f"Задача в воркере завершилась с ошибкой: {task_result.result}")
-                    break
-            except Exception:
-                pass
+            for task_id, (position, task) in list(pending.items()):
+                try:
+                    task_result = AsyncResult(task_id, app=celery_app)
+                    if task_result.successful():
+                        if task_result.result:
+                            batch[position]["generated"] = task_result.result
+                            generated_items.append(batch[position])
+                        del pending[task_id]
+                    elif task_result.failed():
+                        print(f"Задача завершилась с ошибкой: {task_result.result}")
+                        del pending[task_id]
+                except Exception as e:
+                    print(f"Ошибка проверки задачи {task_id}: {e}")
+            if not pending:
+                break
 
-        if not generated_text:
-            print(f"Таймаут выполнения для промпта: {prompt}")
+        if pending:
+            print(f"Таймаут: {len(pending)} задач локального ИИ")
+
+        if not generated_items:
             continue
 
-        print("Оценка ответа через Gemini-судью...")
-        evaluation = await gemini_request(prompt, generated_text, ground_truth)
-
-        results.append({
-            "prompt": prompt,
-            "generated": generated_text,
-            "ground_truth": ground_truth,
-            "score": evaluation["score"],
-            "reason": evaluation["reason"]
-        })
-        print(f"Оценка: {evaluation['score']}/5 | Причина: {evaluation['reason']}\n")
+        print(f"Оценка пачки из {len(generated_items)} ответов одним запросом через Gemini-судью...")
+        evaluations = await gemini_batch_request(generated_items)
+        for item, evaluation in zip(generated_items, evaluations):
+            results.append({
+                "prompt": item["prompt"],
+                "generated": item["generated"],
+                "ground_truth": item["reference"],
+                "score": evaluation["score"],
+                "reason": evaluation["reason"]
+            })
+            print(f"Оценка: {evaluation['score']}/5 | Причина: {evaluation['reason']}")
 
     if results:
         avg_score = sum(r["score"] for r in results) / len(results)

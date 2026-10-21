@@ -48,8 +48,6 @@ async def get_task_status(task_id: str):
         "status": task_result.status,
         "result": task_result.result if task_result.ready() else None
     }
-
-@generator_router.get("/asses")
 @generator_router.get("/assesment")
 async def asses_ai():
     logger.info("Starting dataset assessment")

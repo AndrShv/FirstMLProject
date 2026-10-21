@@ -23,7 +23,6 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    container_name: celery_worker
     working_dir: /app
     command: celery -A workspace.configs.celery_cfg:celery_app worker --loglevel=info
     volumes:
@@ -44,6 +43,7 @@ services:
       postgres:
         condition: service_healthy
     deploy:
+      replicas: 3
       resources:
         limits:
           cpus: '0.5'
