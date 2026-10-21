@@ -1,0 +1,109 @@
+Как работает связка FastAPI + Celery + RabbitMQ + Redis
+========================================================
+
+В проекте используются две разные роли Redis:
+
+1. Redis как кэш приложения. AiCacheService сохраняет уже сгенерированные ответы в Redis-базе /0.
+2. Redis как result backend Celery. Celery сохраняет статус и результат задачи в Redis-базе /1.
+
+RabbitMQ не хранит результат задачи. RabbitMQ только принимает и передаёт сообщения worker-у.
+
+Полный путь запроса
+===================
+
+1. Клиент отправляет POST /generate в FastAPI.
+
+2. FastAPI вызывает:
+
+   new_task = generating_method.delay(data.prompt, data.max_new_tokens)
+
+   Метод .delay() не выполняет генерацию внутри FastAPI. Он создаёт Celery-задачу и публикует сообщение в RabbitMQ.
+
+3. В сообщение попадают имя задачи workspace.worker.generating_method, task_id UUID, аргументы prompt и max_new_tokens, а также служебные данные Celery.
+
+4. Сообщение попадает в RabbitMQ. В конфигурации RabbitMQ используется как broker:
+
+   broker=settings.rabbitmq_url
+
+   RabbitMQ отвечает только за доставку сообщения worker-у. Он не генерирует текст и не является постоянным хранилищем результата.
+
+5. Celery worker забирает сообщение. В логах появляется:
+
+   Task workspace.worker.generating_method[...] received
+
+   После этого worker вызывает generating_method(), которая запускает process_generation_with_cache().
+
+6. Worker проверяет кэш приложения в Redis-базе /0.
+
+   При Cache HIT ответ берётся из кэша, и AI-сервис повторно не вызывается.
+   При Cache MISS worker вызывает AI-сервис, сохраняет результат в PostgreSQL и Redis /0, затем возвращает текст.
+
+7. После завершения функции Celery сохраняет результат в result backend:
+
+   backend=settings.celery_result_backend
+
+   Для Docker это примерно redis://redis:6379/1. В Redis /1 Celery сохраняет статус задачи и её результат по task_id.
+
+8. Клиент проверяет результат запросом:
+
+   GET /task/{task_id}
+
+   FastAPI создаёт AsyncResult(task_id, app=celery_app). AsyncResult обращается не к RabbitMQ, а к result backend, то есть к Redis /1.
+
+9. Если задача ещё выполняется:
+
+   {"task_id": "...", "status": "PENDING", "result": null}
+
+   Если задача завершилась:
+
+   {"task_id": "...", "status": "SUCCESS", "result": "сгенерированный текст"}
+
+Почему раньше был PENDING
+=========================
+
+Раньше использовалась настройка backend="rpc://".
+
+RPC result backend отправляет результат во временную RabbitMQ reply queue. Такой результат рассчитан на клиента, который ждёт ответ в рамках текущего соединения. Но запрос создания задачи и запрос проверки результата — два разных HTTP-запроса. Поэтому следующий запрос к /task/{task_id} не мог надёжно прочитать старый RPC-ответ и видел PENDING.
+
+После перехода на Redis Celery записывает результат в общее хранилище. И FastAPI, и worker используют один Redis, поэтому API может найти результат позже по task_id.
+
+Схема
+=====
+
+Клиент
+  -> FastAPI POST /generate
+  -> Celery .delay()
+  -> RabbitMQ (broker)
+  -> Celery worker
+  -> Redis /0 (кэш приложения)
+  -> AI-сервис и PostgreSQL
+  -> Redis /1 (результат Celery)
+  -> FastAPI GET /task/{task_id}
+  -> Клиент получает SUCCESS и result
+
+Основные статусы
+================
+
+PENDING — задача ещё выполняется или запись о task_id не найдена.
+STARTED — worker начал выполнение. Для этого нужен task_track_started=True.
+SUCCESS — задача завершилась успешно, result содержит возвращённый текст.
+FAILURE — задача завершилась с ошибкой; подробности находятся в result или traceback.
+
+Важно после изменения backend
+=============================
+
+Задачи, созданные до перехода с rpc:// на Redis, не обязаны быть доступны в новом Redis result backend. После изменения конфигурации нужно перезапустить API и worker и создавать новые задачи.
+
+Для Docker:
+
+   docker compose up -d --build redis worker
+
+Если API также запущен в Docker, его тоже нужно перезапустить.
+
+Проверка Redis:
+
+   docker exec redis_cache redis-cli ping
+
+Ожидаемый ответ:
+
+   PONG
