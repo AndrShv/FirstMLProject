@@ -1,15 +1,17 @@
+import asyncio
 import json
 import logging
-from typing import List
+from typing import List, Any
 from google import genai
 from workspace.configs.settings import settings
 from workspace.helpers.cleaners import clean_json
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 logger = logging.getLogger(__name__)
 
 
-async def gemini_batch_request(batch_items: List[dict]) -> List[dict]:
+async def gemini_batch_request(batch_items: List[dict], max_retries: int = 3) -> None | list[dict[str, int | str]] | \
+                                                                                 list[Any]:
     formatted_items = ""
     for idx, item in enumerate(batch_items, 1):
         formatted_items += f"""
@@ -33,34 +35,42 @@ async def gemini_batch_request(batch_items: List[dict]) -> List[dict]:
 ]
 """
 
-    try:
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        response = await client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=judge_prompt,
-        )
+    client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-        raw_text = response.text.strip()
-        cleaned_text = await clean_json(raw_text)
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=judge_prompt,
+            )
 
-        result = json.loads(cleaned_text)
+            raw_text = response.text.strip()
+            cleaned_text = await clean_json(raw_text)
 
-        evaluated_map = {}
-        for res in result:
-            idx = int(res.get("index", 0))
-            evaluated_map[idx] = {
-                "score": int(res.get("score", 1)),
-                "reason": res.get("reason", "Не удалось распарсить причину")
-            }
+            result = json.loads(cleaned_text)
 
-        final_results = []
-        for i in range(1, len(batch_items) + 1):
-            if i in evaluated_map:
-                final_results.append(evaluated_map[i])
+            evaluated_map = {}
+            for res in result:
+                idx = int(res.get("index", 0))
+                evaluated_map[idx] = {
+                    "score": int(res.get("score", 1)),
+                    "reason": res.get("reason", "Не удалось распарсить причину")
+                }
+
+            final_results = []
+            for i in range(1, len(batch_items) + 1):
+                if i in evaluated_map:
+                    final_results.append(evaluated_map[i])
+                else:
+                    final_results.append({"score": 1, "reason": "Пропущено в ответе судьи"})
+            return final_results
+
+        except Exception as e:
+            logger.warning(f"Попытка {attempt}/{max_retries} не удалась: {e}")
+            if attempt < max_retries:
+                wait_time = attempt * 5
+                logger.info(f"Ожидание {wait_time} секунд перед повторным запросом к Gemini...")
+                await asyncio.sleep(wait_time)
             else:
-                final_results.append({"score": 1, "reason": "Пропущено в ответе судьи"})
-        return final_results
-
-    except Exception as e:
-        logger.error(f"Ошибка при пакетном запросе к Gemini: {e}")
-        return [{"score": 1, "reason": f"Ошибка запроса батча: {str(e)}"} for _ in batch_items]
+                logger.error(f"Все попытки исчерпаны. Ошибка при пакетном запросе к Gemini: {e}")
+                return [{"score": 1, "reason": f"Ошибка запроса батча (после {max_retries}): {str(e)}"} for _ in batch_items]
