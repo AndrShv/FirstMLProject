@@ -315,33 +315,31 @@ curl http://localhost:8000/
 ```
 Код для обучения в Colab (QLoRA)
 ```python
+!pip install -q torch transformers datasets trl peft bitsandbytes accelerate torchao
+
+import os
+
+os.environ["WANDB_DISABLED"] = "true"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import sys
+
+for mod in list(sys.modules.keys()):
+  if "wandb" in mod:
+    del sys.modules[mod]
+
 import torch
 from datasets import load_dataset
 from google.colab import files
-from peft import LoraConfig, prepare_model_for_kbit_training
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
-)
-from trl import SFTTrainer
+from peft import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
 
-# 1. Автоматическая загрузка датасета с компьютера
 print("Пожалуйста, выберите файл train.jsonl на вашем компьютере:")
 uploaded = files.upload()
-filename = list(uploaded.keys())[0]  # Получаем имя загруженного файла
+filename = list(uploaded.keys())[0]
 
-# 2. Базовая модель
-MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
-
-# 3. Настройка 4-битной квантизации для экономии памяти GPU
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-)
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 
 print("Загружаем токенизатор и модель...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -350,14 +348,11 @@ tokenizer.padding_side = "right"
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
-    quantization_config=bnb_config,
-    device_map="auto",
+    torch_dtype=torch.float16,
+    device_map="cuda:0",
     trust_remote_code=True,
 )
 
-model = prepare_model_for_kbit_training(model)
-
-# 4. Конфигурация LoRA-адаптера
 peft_config = LoraConfig(
     r=16,
     lora_alpha=32,
@@ -375,12 +370,10 @@ peft_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-# 5. Загрузка датасета из загруженного файла
 dataset = load_dataset("json", data_files=filename, split="train")
 
-# 6. Параметры тренировки
-training_args = TrainingArguments(
-    output_dir="./results_qlora",
+training_args = SFTConfig(
+    output_dir="./results_qlora_3b",
     per_device_train_batch_size=2,
     gradient_accumulation_steps=4,
     learning_rate=2e-4,
@@ -388,25 +381,66 @@ training_args = TrainingArguments(
     num_train_epochs=3,
     save_strategy="epoch",
     fp16=True,
-    optim="paged_adamw_8bit",
+    bf16=False,
+    optim="adamw_torch",
+    max_length=512,
+    report_to="none",
 )
 
-# 7. Запуск тренера
 trainer = SFTTrainer(
     model=model,
     train_dataset=dataset,
     peft_config=peft_config,
-    max_seq_length=512,
-    tokenizer=tokenizer,
+    processing_class=tokenizer,
     args=training_args,
 )
 
-print("Запуск обучения QLoRA...")
+print("Запуск обучения QLoRA для 3B модели...")
 trainer.train()
 
-# 8. Сохранение готового адаптера
-adapter_path = "./my_docker_lora_adapter"
+adapter_path = "./my_docker_lora_adapter_3b"
 trainer.model.save_pretrained(adapter_path)
 tokenizer.save_pretrained(adapter_path)
 print(f"Готово! Адаптер сохранен в папку {adapter_path}")
+```
+
+
+```python
+import torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+ADAPTER_PATH = "./my_docker_lora_adapter_3b"
+
+print("Загружаем базовую модель и токенизатор...")
+tokenizer = AutoTokenizer.from_pretrained(ADAPTER_PATH)
+base_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, torch_dtype=torch.float16, device_map="cuda:0", trust_remote_code=True
+)
+
+print("Подключаем твой LoRA-адаптер...")
+model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
+
+# Пример твоего технического вопроса (например, по Docker или FastAPI)
+prompt = (
+    "System: Ты опытный DevOps-инженер.\nUser: Как написать Dockerfile для FastAPI"
+    " приложения с Poetry?"
+)
+
+inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+
+print("Генерируем ответ модели...")
+outputs = model.generate(
+    **inputs,
+    max_new_tokens=256,
+    temperature=0.7,
+    top_p=0.9,
+    do_sample=True,
+    pad_token_id=tokenizer.eos_token_id,
+)
+
+response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print("\n--- ОТВЕТ ОБУЧЕННОЙ МОДЕЛИ ---")
+print(response)
 ```
