@@ -26,8 +26,6 @@ requirements.txt
 
 ## Важно: безопасность ngrok-токена
 
-Токен ngrok был опубликован в сообщении. Считайте его скомпрометированным: отзовите его в [личном кабинете ngrok](https://dashboard.ngrok.com/get-started/your-authtoken) и создайте новый.
-
 Не записывайте токен в Git, README или публичную ячейку Colab. В Colab откройте **Secrets** и создайте secret `NGROK_AUTHTOKEN`, затем используйте:
 
 ```python
@@ -116,10 +114,40 @@ curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&max_new_tokens
 Проверить статус:
 
 ```bash
-curl "http://localhost:8000/task_status/<task-id>"
+curl "http://localhost:8000/task/<task-id>"
 ```
 
-Статусы: `Pending`, `completed`, `failed`. При успешном выполнении результат находится в поле `result`.
+Статусы Celery: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`. При успешном выполнении результат находится в поле `result`.
+
+## Пакетная оценка датасета
+
+Endpoint оценки датасета:
+
+```bash
+curl "http://localhost:8000/assesment"
+```
+
+Оценка выполняется пакетами по 10 элементов:
+
+```text
+10 prompts → 10 задач Celery → локальный/cloud ИИ
+                                      ↓
+                    1 запрос к Gemini-судье
+                                      ↓
+                         оценки 1–5 и причины
+```
+
+Для каждой пачки сначала параллельно ставятся 10 задач в Celery. После получения ответов они объединяются в один JSON-промпт и отправляются в Gemini через `gemini_batch_request()`. Последняя пачка может содержать меньше 10 элементов.
+
+Текущая модель судьи задаётся в `workspace/services/gemini_worker.py`:
+
+```python
+GEMINI_MODEL = "gemini-3.6-flash"
+```
+
+Для работы требуется `GEMINI_API_KEY` в настройках проекта. Ошибка `503 UNAVAILABLE` означает временную перегрузку Gemini; её не следует считать оценкой `1/5`. В production рекомендуется добавить повтор запроса с exponential backoff или fallback на другую доступную Flash-модель.
+
+Отчёт сохраняется в `eval_report.json` и содержит `prompt`, ответ локальной модели, эталон, оценку и объяснение судьи.
 
 ## Код Colab
 
@@ -144,7 +172,8 @@ os.system("pkill -9 -f vllm")
 ngrok.kill()
 time.sleep(3)
 
-NGROK_TOKEN = "3Bso9CD8XDewe5wRxdNSLmBF0EW_VxeqzyfAhuGm4Zkt8zt7"
+from google.colab import userdata
+NGROK_TOKEN = userdata.get("NGROK_AUTHTOKEN")
 ngrok.set_auth_token(NGROK_TOKEN)
 
 VLLM_PORT = 8001
@@ -283,4 +312,101 @@ docker compose down
 ```bash
 python -m compileall workspace
 curl http://localhost:8000/
+```
+Код для обучения в Colab (QLoRA)
+```python
+import torch
+from datasets import load_dataset
+from google.colab import files
+from peft import LoraConfig, prepare_model_for_kbit_training
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+)
+from trl import SFTTrainer
+
+# 1. Автоматическая загрузка датасета с компьютера
+print("Пожалуйста, выберите файл train.jsonl на вашем компьютере:")
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]  # Получаем имя загруженного файла
+
+# 2. Базовая модель
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+
+# 3. Настройка 4-битной квантизации для экономии памяти GPU
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True,
+)
+
+print("Загружаем токенизатор и модель...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=bnb_config,
+    device_map="auto",
+    trust_remote_code=True,
+)
+
+model = prepare_model_for_kbit_training(model)
+
+# 4. Конфигурация LoRA-адаптера
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    target_modules=[
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+# 5. Загрузка датасета из загруженного файла
+dataset = load_dataset("json", data_files=filename, split="train")
+
+# 6. Параметры тренировки
+training_args = TrainingArguments(
+    output_dir="./results_qlora",
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+    learning_rate=2e-4,
+    logging_steps=1,
+    num_train_epochs=3,
+    save_strategy="epoch",
+    fp16=True,
+    optim="paged_adamw_8bit",
+)
+
+# 7. Запуск тренера
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=dataset,
+    peft_config=peft_config,
+    max_seq_length=512,
+    tokenizer=tokenizer,
+    args=training_args,
+)
+
+print("Запуск обучения QLoRA...")
+trainer.train()
+
+# 8. Сохранение готового адаптера
+adapter_path = "./my_docker_lora_adapter"
+trainer.model.save_pretrained(adapter_path)
+tokenizer.save_pretrained(adapter_path)
+print(f"Готово! Адаптер сохранен в папку {adapter_path}")
 ```
