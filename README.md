@@ -1,79 +1,72 @@
 # AI Microservice Starter — Hybrid Cloud GPU
 
-Гибридный микросервис для генерации текста. FastAPI, RabbitMQ и Celery worker работают локально, а модель запускается на GPU T4 в Google Colab через HTTPS-туннель ngrok.
+Гибридный микросервис для генерации текста: локально работают FastAPI, RabbitMQ и Celery worker, а модель `Qwen/Qwen2.5-3B-Instruct` с вашим собственным LoRA-адаптером (`docker_adapter`) запускается на GPU T4 в Google Colab. Worker обращается к Colab через безопасный HTTPS-туннель ngrok.
 
 ```text
 Клиент → FastAPI :8000 → RabbitMQ :5672 → Celery worker
                                       ↓ HTTPS через ngrok
-                              Google Colab + T4 GPU
+                              Google Colab + T4 GPU (vLLM + LoRA)
 ```
 
-Локальный компьютер принимает запросы и управляет очередью, но не хранит веса модели и не выполняет инференс.
+Локальный компьютер принимает запросы и управляет очередью задач, но не хранит тяжелые веса модели и не выполняет ресурсоемкий инференс.
 
-Структура проекта вынесена в [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md), а кодовые фрагменты — в [README_CODE.md](README_CODE.md).
+## Структура проекта
 
-## Безопасность ngrok-токена
-
-Не записывайте токен в Git, README или публичную ячейку Colab. В Colab откройте **Secrets** и создайте secret `NGROK_AUTHTOKEN`.
-
-## Запуск
-
-После каждого перезапуска Google Colab выберите **Runtime → Change runtime type → T4 GPU**, установите зависимости и запустите код из [README_CODE.md](README_CODE.md). Скопируйте новый URL ngrok с endpoint `/generate-cloud` в `workspace/services/ai_service.py`.
-
-Запустите RabbitMQ и worker:
-
-```bash
-docker compose up --build
+```text
+workspace/
+├── __init__.py
+├── main.py                       # Главное FastAPI-приложение
+├── rest/
+│   └── generator_controller.py   # HTTP-запросы и логика бенчмарка
+├── celery_cfg.py                 # Конфигурация брокера Celery
+├── worker.py                     # Асинхронная Celery-задача
+└── services/
+    ├── ai_service.py             # HTTP-клиент Google Colab через ngrok
+    └── gemini_worker.py          # Gemini-судья пакетной оценки
+Dockerfile
+docker-compose.yml
+requirements.txt
+eval_report.json                  # Отчёт оценки качества ответов
 ```
 
-В новом терминале запустите FastAPI:
+## Описание компонентов проекта
 
-```bash
-source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
-uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
-```
+### 1. Инфраструктура и оркестрация
 
-RabbitMQ Management UI: http://localhost:15672 (`guest` / `guest`). Swagger: http://localhost:8000/docs.
+`Dockerfile` и `docker-compose.yml` описывают изоляцию локальной среды, сборку приложения и запуск RabbitMQ, через который асинхронно координируются задачи.
 
-Если менялся только URL Colab:
+`requirements.txt` содержит локальные Python-зависимости: FastAPI, Celery, Pydantic, Requests, Google GenAI SDK и другие.
 
-```bash
-docker compose restart worker
-```
+### 2. Локальное приложение и задачи (`workspace/`)
 
-## API
+`main.py` — точка входа локального FastAPI-сервиса. Запускает сервер на порту 8000 и подключает маршруты.
 
-Создать задачу:
+`rest/generator_controller.py` обрабатывает HTTP-вызовы клиентов. Реализует эндпоинт пакетной оценки `/assesment`, который разбивает датасет на пачки, параллельно ставит задачи в очередь и отправляет их на судейство.
 
-```bash
-curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&max_new_tokens=50"
-```
+`celery_cfg.py` настраивает подключение Celery к RabbitMQ: `amqp://guest:guest@rabbitmq:5672//`.
 
-Проверить статус:
+`worker.py` содержит фоновую Celery-задачу, которая принимает промпт и передаёт его в облачный сервис.
 
-```bash
-curl "http://localhost:8000/task/<task-id>"
-```
+`services/ai_service.py` выполняет HTTP POST-запросы на публичный ngrok URL Google Colab, где запущена модель.
 
-Статусы Celery: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`. При успехе результат находится в поле `result`.
+`services/gemini_worker.py` отправляет пачки ответов локальной модели в Gemini Flash для объективной оценки по шкале от 1 до 5 с подробным обоснованием.
 
-## Пакетная оценка датасета
+## Порядок запуска системы
 
-```bash
-curl "http://localhost:8000/assesment"
-```
+1. Запустите Google Colab, используя второй файл с кодом для Colab, и получите актуальный ngrok URL:
 
-Оценка выполняется пачками по 10 элементов: задачи отправляются в Celery параллельно, ответы объединяются и передаются Gemini-судье. Отчёт сохраняется в `eval_report.json`.
+   `https://xxxx.ngrok-free.dev/generate-cloud`
 
-Модель судьи задаётся в `workspace/services/gemini_worker.py` через `GEMINI_MODEL`. Для работы требуется `GEMINI_API_KEY`. Ошибка `503 UNAVAILABLE` означает временную перегрузку Gemini, а не оценку `1/5`.
+2. Обновите `workspace/services/ai_service.py`, прописав туда полученный ngrok URL.
 
-## Остановка и проверка
+3. Запустите RabbitMQ и worker локально через Docker Compose:
 
-```bash
-docker compose down
-python -m compileall workspace
-curl http://localhost:8000/
-```
+   ```bash
+   docker compose up --build
+   ```
 
-При следующем запуске Colab снова загрузите модель, получите новый ngrok URL, обновите `workspace/services/ai_service.py` и перезапустите worker.
+4. Запустите локальный FastAPI:
+
+   ```bash
+   uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
+   ```
