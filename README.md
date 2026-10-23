@@ -1,6 +1,6 @@
 # AI Microservice Starter — Hybrid Cloud GPU
 
-Гибридный микросервис для генерации текста: локально работают FastAPI, RabbitMQ и Celery worker, а модель `Qwen/Qwen2.5-0.5B-Instruct` запускается на GPU T4 в Google Colab. Worker обращается к Colab через HTTPS-туннель ngrok.
+Гибридный микросервис для генерации текста. FastAPI, RabbitMQ и Celery worker работают локально, а модель запускается на GPU T4 в Google Colab через HTTPS-туннель ngrok.
 
 ```text
 Клиент → FastAPI :8000 → RabbitMQ :5672 → Celery worker
@@ -10,79 +10,23 @@
 
 Локальный компьютер принимает запросы и управляет очередью, но не хранит веса модели и не выполняет инференс.
 
-## Структура проекта
+Структура проекта вынесена в [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md), а кодовые фрагменты — в [README_CODE.md](README_CODE.md).
 
-```text
-workspace/
-├── main.py                 # FastAPI-приложение
-├── gen_rest_controller.py  # HTTP endpoints
-├── celery_cfg.py           # Конфигурация Celery
-├── worker.py               # Celery-задача
-└── ai_service.py           # HTTP-запрос из worker в Colab
-Dockerfile
-docker-compose.yml
-requirements.txt
-```
+## Безопасность ngrok-токена
 
-## Важно: безопасность ngrok-токена
+Не записывайте токен в Git, README или публичную ячейку Colab. В Colab откройте **Secrets** и создайте secret `NGROK_AUTHTOKEN`.
 
-Не записывайте токен в Git, README или публичную ячейку Colab. В Colab откройте **Secrets** и создайте secret `NGROK_AUTHTOKEN`, затем используйте:
+## Запуск
 
-```python
-from google.colab import userdata
-from pyngrok import ngrok
+После каждого перезапуска Google Colab выберите **Runtime → Change runtime type → T4 GPU**, установите зависимости и запустите код из [README_CODE.md](README_CODE.md). Скопируйте новый URL ngrok с endpoint `/generate-cloud` в `workspace/services/ai_service.py`.
 
-ngrok.set_auth_token(userdata.get("NGROK_AUTHTOKEN"))
-```
-
-## Запуск после перезапуска Google Colab
-
-После остановки или нового запуска Colab старый GPU-процесс и старый ngrok URL обычно недействительны. Каждый раз выполняйте следующие шаги.
-
-### 1. Запустите Colab GPU
-
-1. Откройте notebook.
-2. Выберите **Runtime → Change runtime type → T4 GPU**.
-3. Выполните ячейку установки:
-
-```python
-!pip install -q fastapi uvicorn transformers torch accelerate pyngrok vllm 
-```
-
-4. Выполните код из раздела [Код Colab](#код-colab).
-5. Дождитесь загрузки модели и скопируйте напечатанный URL вида `https://xxxx.ngrok-free.dev`.
-
-Не закрывайте эту Colab-сессию: ячейка с сервером должна оставаться активной.
-
-### 2. Обновите URL в локальном проекте
-
-В `workspace/ai_service.py` замените URL на новый адрес Colab с endpoint `/generate-cloud`:
-
-```python
-CLOUD_URL = "https://xxxx.ngrok-free.dev/generate-cloud"
-```
-
-После изменения URL перезапустите Celery worker.
-
-### 3. Запустите RabbitMQ и worker
-
-В корне проекта:
+Запустите RabbitMQ и worker:
 
 ```bash
 docker compose up --build
 ```
 
-RabbitMQ Management UI: http://localhost:15672 (`guest` / `guest`).
-
-Если контейнеры уже собраны и менялся только URL Colab:
-
-```bash
-docker compose restart worker
-```
-
-### 4. Запустите локальный FastAPI
-
-В новом терминале:
+В новом терминале запустите FastAPI:
 
 ```bash
 source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
@@ -90,7 +34,13 @@ pip install -r requirements.txt
 uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Swagger: http://localhost:8000/docs
+RabbitMQ Management UI: http://localhost:15672 (`guest` / `guest`). Swagger: http://localhost:8000/docs.
+
+Если менялся только URL Colab:
+
+```bash
+docker compose restart worker
+```
 
 ## API
 
@@ -100,479 +50,30 @@ Swagger: http://localhost:8000/docs
 curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&max_new_tokens=50"
 ```
 
-Ответ содержит `task_id`:
-
-```json
-{
-  "status": "queued",
-  "prompt": "a new key",
-  "task_id": "<task-id>",
-  "detail": "Task has been accepted for processing by Celery worker."
-}
-```
-
 Проверить статус:
 
 ```bash
 curl "http://localhost:8000/task/<task-id>"
 ```
 
-Статусы Celery: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`. При успешном выполнении результат находится в поле `result`.
+Статусы Celery: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`. При успехе результат находится в поле `result`.
 
 ## Пакетная оценка датасета
-
-Endpoint оценки датасета:
 
 ```bash
 curl "http://localhost:8000/assesment"
 ```
 
-Оценка выполняется пакетами по 10 элементов:
+Оценка выполняется пачками по 10 элементов: задачи отправляются в Celery параллельно, ответы объединяются и передаются Gemini-судье. Отчёт сохраняется в `eval_report.json`.
 
-```text
-10 prompts → 10 задач Celery → локальный/cloud ИИ
-                                      ↓
-                    1 запрос к Gemini-судье
-                                      ↓
-                         оценки 1–5 и причины
-```
+Модель судьи задаётся в `workspace/services/gemini_worker.py` через `GEMINI_MODEL`. Для работы требуется `GEMINI_API_KEY`. Ошибка `503 UNAVAILABLE` означает временную перегрузку Gemini, а не оценку `1/5`.
 
-Для каждой пачки сначала параллельно ставятся 10 задач в Celery. После получения ответов они объединяются в один JSON-промпт и отправляются в Gemini через `gemini_batch_request()`. Последняя пачка может содержать меньше 10 элементов.
-
-Текущая модель судьи задаётся в `workspace/services/gemini_worker.py`:
-
-```python
-GEMINI_MODEL = "gemini-3.6-flash"
-```
-
-Для работы требуется `GEMINI_API_KEY` в настройках проекта. Ошибка `503 UNAVAILABLE` означает временную перегрузку Gemini; её не следует считать оценкой `1/5`. В production рекомендуется добавить повтор запроса с exponential backoff или fallback на другую доступную Flash-модель.
-
-Отчёт сохраняется в `eval_report.json` и содержит `prompt`, ответ локальной модели, эталон, оценку и объяснение судьи.
-
-## Код Colab
-
-Сначала выполните ячейку установки зависимостей, затем этот код:
-
-```python
-import subprocess
-import time
-import threading
-import traceback
-import requests
-import uvicorn
-import os
-import sys
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from pyngrok import ngrok
-
-# === Чистим старые процессы ===
-os.system("pkill -9 -f uvicorn")
-os.system("pkill -9 -f vllm")
-ngrok.kill()
-time.sleep(3)
-
-from google.colab import userdata
-NGROK_TOKEN = userdata.get("NGROK_AUTHTOKEN")
-ngrok.set_auth_token(NGROK_TOKEN)
-
-VLLM_PORT = 8001
-WRAPPER_PORT = 5002
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
-
-# === Запуск vLLM ===
-print(f"⏳ Запускаем vLLM на порту {VLLM_PORT}...")
-vllm_process = subprocess.Popen(
-    [
-        "python3", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", model_name,
-        "--port", str(VLLM_PORT),
-        "--dtype", "float16"
-    ],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1
-)
-
-def stream_vllm_logs():
-    for line in vllm_process.stdout:
-        print(f"[vLLM] {line}", end="")
-
-threading.Thread(target=stream_vllm_logs, daemon=True).start()
-
-# === Ждём готовности vLLM ===
-start = time.time()
-while time.time() - start < 300:
-    if vllm_process.poll() is not None:
-        print(f"\n❌ vLLM упал с кодом: {vllm_process.returncode}")
-        sys.exit(1)
-    try:
-        r = requests.get(f"http://localhost:{VLLM_PORT}/health", timeout=2)
-        if r.status_code == 200:
-            print(f"\n✅ vLLM готов на порту {VLLM_PORT}!")
-            break
-    except requests.exceptions.ConnectionError:
-        pass
-    time.sleep(5)
-else:
-    print("❌ Таймаут")
-    vllm_process.kill()
-    sys.exit(1)
-
-# === FastAPI wrapper ===
-app = FastAPI(title="Colab AI Wrapper")
-
-class GenerationRequest(BaseModel):
-    prompt: str
-    max_new_tokens: int = 100
-
-@app.post("/generate-cloud")
-def cloud_generate(req: GenerationRequest):
-    try:
-        response = requests.post(
-            f"http://localhost:{VLLM_PORT}/v1/chat/completions",
-            json={
-                "model": model_name,
-                "messages": [{"role": "user", "content": req.prompt}],
-                "max_tokens": req.max_new_tokens,
-                "temperature": 0.7
-            },
-            timeout=60
-        )
-        if response.status_code != 200:
-            raise Exception(f"vLLM error {response.status_code}: {response.text}")
-
-        answer = response.json()["choices"][0]["message"]["content"]
-        return {"prompt": req.prompt, "response": answer}
-
-    except Exception as e:
-        print("❌ Ошибка:\n", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
-
-def run_server():
-    uvicorn.run(app, host="0.0.0.0", port=WRAPPER_PORT, log_level="warning")
-
-threading.Thread(target=run_server, daemon=True).start()
-time.sleep(2)
-
-# === ngrok туннель ===
-public_url = ngrok.connect(WRAPPER_PORT)
-new_cloud_url = f"{public_url.public_url}/generate-cloud"
-
-print("🚀 Всё запущено!")
-print(f"👉 СКОПИРУЙ В ai_service.py:\n{new_cloud_url}")
-```
-
-
-
-```python
-import os
-import time
-import subprocess
-
-# Убиваем всё что держит GPU
-os.system("fuser -k /dev/nvidia0")
-os.system("fuser -k /dev/nvidiactl")
-os.system("pkill -9 -f vllm")
-time.sleep(3)
-
-# Проверяем что VRAM освободилась
-result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
-print(result.stdout)
-```
-
-```python
-import subprocess
-result = subprocess.run(['fuser', '-v', '/dev/nvidia0'], capture_output=True, text=True)
-print(result.stderr)  # покажет PID процессов на GPU
-```
-## Переменные окружения
-
-Локальный RabbitMQ по умолчанию:
-
-```bash
-export CELERY_BROKER_URL=amqp://guest:guest@localhost:5672//
-```
-
-В Docker Compose worker подключается к RabbitMQ по адресу контейнера `rabbitmq`.
-
-## Остановка и следующий запуск
-
-Остановить локальные контейнеры:
+## Остановка и проверка
 
 ```bash
 docker compose down
-```
-
-При следующем запуске Colab снова загрузите модель, получите новый ngrok URL, обновите `workspace/ai_service.py` и перезапустите worker.
-
-Проверить проект:
-
-```bash
 python -m compileall workspace
 curl http://localhost:8000/
 ```
-Код для обучения в Colab (QLoRA)
-```python
-!pip install -q torch transformers datasets trl peft bitsandbytes accelerate torchao
 
-import os
-
-os.environ["WANDB_DISABLED"] = "true"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-import sys
-
-for mod in list(sys.modules.keys()):
-  if "wandb" in mod:
-    del sys.modules[mod]
-
-import torch
-from datasets import load_dataset
-from google.colab import files
-from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import SFTConfig, SFTTrainer
-
-print("Пожалуйста, выберите файл train.jsonl на вашем компьютере:")
-uploaded = files.upload()
-filename = list(uploaded.keys())[0]
-
-MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
-
-print("Загружаем токенизатор и модель...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
-
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.float16,
-    device_map="cuda:0",
-    trust_remote_code=True,
-)
-
-peft_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=[
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
-
-dataset = load_dataset("json", data_files=filename, split="train")
-
-training_args = SFTConfig(
-    output_dir="./results_qlora_3b",
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
-    learning_rate=2e-4,
-    logging_steps=1,
-    num_train_epochs=3,
-    save_strategy="epoch",
-    fp16=True,
-    bf16=False,
-    optim="adamw_torch",
-    max_length=512,
-    report_to="none",
-)
-
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=dataset,
-    peft_config=peft_config,
-    processing_class=tokenizer,
-    args=training_args,
-)
-
-print("Запуск обучения QLoRA для 3B модели...")
-trainer.train()
-
-adapter_path = "./my_docker_lora_adapter_3b"
-trainer.model.save_pretrained(adapter_path)
-tokenizer.save_pretrained(adapter_path)
-print(f"Готово! Адаптер сохранен в папку {adapter_path}")
-```
-
-
-```python
-import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
-ADAPTER_PATH = "./my_docker_lora_adapter_3b"
-
-print("Загружаем базовую модель и токенизатор...")
-tokenizer = AutoTokenizer.from_pretrained(ADAPTER_PATH)
-base_model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, torch_dtype=torch.float16, device_map="cuda:0", trust_remote_code=True
-)
-
-print("Подключаем твой LoRA-адаптер...")
-model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
-
-# Пример твоего технического вопроса (например, по Docker или FastAPI)
-prompt = (
-    "System: Ты опытный DevOps-инженер.\nUser: Как написать Dockerfile для FastAPI"
-    " приложения с Poetry?"
-)
-
-inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-
-print("Генерируем ответ модели...")
-outputs = model.generate(
-    **inputs,
-    max_new_tokens=256,
-    temperature=0.7,
-    top_p=0.9,
-    do_sample=True,
-    pad_token_id=tokenizer.eos_token_id,
-)
-
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-print("\n--- ОТВЕТ ОБУЧЕННОЙ МОДЕЛИ ---")
-print(response)
-```
-
-
-
-```python
-import os
-import subprocess
-import sys
-import threading
-import time
-import requests
-import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from pyngrok import ngrok
-
-# === Чистим старые процессы ===
-os.system("pkill -9 -f uvicorn")
-os.system("pkill -9 -f vllm")
-ngrok.kill()
-time.sleep(3)
-
-from google.colab import userdata
-
-NGROK_TOKEN = userdata.get("NGROK_AUTHTOKEN")
-ngrok.set_auth_token(NGROK_TOKEN)
-
-VLLM_PORT = 8001
-WRAPPER_PORT = 5002
-
-base_model_name = "Qwen/Qwen2.5-3B-Instruct"
-adapter_path = "./my_docker_lora_adapter_3b"
-lora_model_id = "docker_adapter"  # Имя, под которым будет доступен адаптер
-
-# === Запуск vLLM с поддержкой LoRA ===
-print(
-    f"⏳ Запускаем vLLM для 3B модели с адаптером на порту {VLLM_PORT}..."
-)
-vllm_process = subprocess.Popen(
-    [
-        "python3",
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
-        base_model_name,
-        "--port",
-        str(VLLM_PORT),
-        "--dtype",
-        "float16",
-        "--enable-lora",  # Включаем поддержку LoRA
-        "--lora-modules",
-        f"{lora_model_id}={adapter_path}",  # Подключаем твой адаптер
-    ],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1,
-)
-
-
-def stream_vllm_logs():
-  for line in vllm_process.stdout:
-    print(f"[vLLM] {line}", end="")
-
-
-threading.Thread(target=stream_vllm_logs, daemon=True).start()
-
-# === Ждём готовности vLLM ===
-start = time.time()
-while time.time() - start < 300:
-  if vllm_process.poll() is not None:
-    print(f"\n❌ vLLM упал с кодом: {vllm_process.returncode}")
-    sys.exit(1)
-  try:
-    r = requests.get(f"http://localhost:{VLLM_PORT}/health", timeout=2)
-    if r.status_code == 200:
-      print(f"\n✅ vLLM готов на порту {VLLM_PORT}!")
-      break
-  except requests.exceptions.ConnectionError:
-    pass
-  time.sleep(5)
-else:
-  print("❌ Таймаут")
-  vllm_process.kill()
-  sys.exit(1)
-
-# === FastAPI wrapper ===
-app = FastAPI(title="Colab AI Wrapper")
-
-
-class GenerationRequest(BaseModel):
-  prompt: str
-  max_new_tokens: int = 512
-
-
-@app.post("/generate-cloud")
-def cloud_generate(req: GenerationRequest):
-  try:
-    response = requests.post(
-        f"http://localhost:{VLLM_PORT}/v1/chat/completions",
-        json={
-            "model": lora_model_id,  # Указываем имя нашего LoRA-модуля
-            "messages": [{"role": "user", "content": req.prompt}],
-            "max_tokens": req.max_new_tokens,
-            "temperature": 0.7,
-        },
-        timeout=60,
-    )
-    if response.status_code != 200:
-      raise Exception(f"vLLM error {response.status_code}: {response.text}")
-
-    answer = response.json()["choices"][0]["message"]["content"]
-    return {"prompt": req.prompt, "response": answer}
-
-  except Exception as e:
-    print("❌ Ошибка:\n", traceback.format_exc())
-    raise HTTPException(status_code=500, detail=str(e))
-
-
-def run_server():
-  uvicorn.run(app, host="0.0.0.0", port=WRAPPER_PORT, log_level="warning")
-
-
-threading.Thread(target=run_server, daemon=True).start()
-time.sleep(2)
-
-# === ngrok туннель ===
-public_url = ngrok.connect(WRAPPER_PORT)
-new_cloud_url = f"{public_url.public_url}/generate-cloud"
-
-print("🚀 Всё запущено!")
-print(f"👉 СКОПИРУЙ В ai_service.py:\n{new_cloud_url}")
-```
+При следующем запуске Colab снова загрузите модель, получите новый ngrok URL, обновите `workspace/services/ai_service.py` и перезапустите worker.
