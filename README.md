@@ -1,98 +1,79 @@
-# AI Microservice Starter
+# AI Microservice Starter — Hybrid Cloud GPU
 
-Небольшой микросервис на FastAPI и Celery. API принимает запрос на генерацию ключа в заданном диапазоне, а Celery worker выполняет задачу асинхронно через RabbitMQ.
-
-## Структура проекта
+Гибридный микросервис для генерации текста. FastAPI, RabbitMQ и Celery worker работают локально, а модель запускается на GPU T4 в Google Colab через HTTPS-туннель ngrok.
 
 ```text
-workspace/
-├── main.py                 # FastAPI-приложение
-├── gen_rest_controller.py  # HTTP endpoints
-├── celery_cfg.py           # Конфигурация Celery
-└── worker.py               # Celery-задача
-Dockerfile
-docker-compose.yml         # RabbitMQ и Celery worker
-requirements.txt
+Клиент → FastAPI :8000 → RabbitMQ :5672 → Celery worker
+                                      ↓ HTTPS через ngrok
+                              Google Colab + T4 GPU
 ```
+
+Локальный компьютер принимает запросы и управляет очередью, но не хранит веса модели и не выполняет инференс.
+
+Структура проекта вынесена в [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md), а кодовые фрагменты — в [README_CODE.md](README_CODE.md).
+
+## Безопасность ngrok-токена
+
+Не записывайте токен в Git, README или публичную ячейку Colab. В Colab откройте **Secrets** и создайте secret `NGROK_AUTHTOKEN`.
 
 ## Запуск
 
-### Вариант 1: Docker Compose
+После каждого перезапуска Google Colab выберите **Runtime → Change runtime type → T4 GPU**, установите зависимости и запустите код из [README_CODE.md](README_CODE.md). Скопируйте новый URL ngrok с endpoint `/generate-cloud` в `workspace/services/ai_service.py`.
 
-Запустите RabbitMQ и Celery worker:
+Запустите RabbitMQ и worker:
 
 ```bash
 docker compose up --build
 ```
 
-RabbitMQ Management UI будет доступен по адресу http://localhost:15672.
-
-Параметры по умолчанию: `guest` / `guest`.
-
-Затем запустите FastAPI локально:
+В новом терминале запустите FastAPI:
 
 ```bash
-python3 -m venv .venv
 source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
 uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-При локальном запуске API должен использовать RabbitMQ на `localhost:5672`. Это значение задано по умолчанию в `workspace/celery_cfg.py`.
+RabbitMQ Management UI: http://localhost:15672 (`guest` / `guest`). Swagger: http://localhost:8000/docs.
 
-### Вариант 2: локальный Celery worker
-
-Если RabbitMQ уже запущен локально, worker можно запустить напрямую:
+Если менялся только URL Colab:
 
 ```bash
-celery -A workspace.celery_cfg:celery_app worker --loglevel=info
+docker compose restart worker
 ```
 
 ## API
 
-Документация Swagger: http://localhost:8000/docs
-
-### Создать задачу
+Создать задачу:
 
 ```bash
-curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&start=1&end=1000"
+curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&max_new_tokens=50"
 ```
 
-Ответ содержит `task_id`:
-
-```json
-{
-  "status": "queued",
-  "prompt": "a new key",
-  "task_id": "<task-id>",
-  "detail": "Task has been accepted for processing by Celery worker."
-}
-```
-
-### Проверить статус
-
-Подставьте полученный идентификатор задачи:
+Проверить статус:
 
 ```bash
-curl "http://localhost:8000/task_status/<task-id>"
+curl "http://localhost:8000/task/<task-id>"
 ```
 
-Возможные статусы: `Pending`, `completed` и `failed`.
+Статусы Celery: `PENDING`, `STARTED`, `SUCCESS`, `FAILURE`. При успехе результат находится в поле `result`.
 
-## Переменные окружения
-
-Для подключения к RabbitMQ можно задать URL брокера:
+## Пакетная оценка датасета
 
 ```bash
-export CELERY_BROKER_URL=amqp://guest:guest@localhost:5672//
+curl "http://localhost:8000/assesment"
 ```
 
-В Docker Compose worker автоматически использует адрес RabbitMQ-контейнера.
+Оценка выполняется пачками по 10 элементов: задачи отправляются в Celery параллельно, ответы объединяются и передаются Gemini-судье. Отчёт сохраняется в `eval_report.json`.
 
-## Проверка
+Модель судьи задаётся в `workspace/services/gemini_worker.py` через `GEMINI_MODEL`. Для работы требуется `GEMINI_API_KEY`. Ошибка `503 UNAVAILABLE` означает временную перегрузку Gemini, а не оценку `1/5`.
 
-Проверка синтаксиса исходников:
+## Остановка и проверка
 
 ```bash
+docker compose down
 python -m compileall workspace
+curl http://localhost:8000/
 ```
+
+При следующем запуске Colab снова загрузите модель, получите новый ngrok URL, обновите `workspace/services/ai_service.py` и перезапустите worker.
