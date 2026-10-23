@@ -1,98 +1,72 @@
-# AI Microservice Starter
+# AI Microservice Starter — Hybrid Cloud GPU
 
-Небольшой микросервис на FastAPI и Celery. API принимает запрос на генерацию ключа в заданном диапазоне, а Celery worker выполняет задачу асинхронно через RabbitMQ.
+Гибридный микросервис для генерации текста: локально работают FastAPI, RabbitMQ и Celery worker, а модель `Qwen/Qwen2.5-3B-Instruct` с вашим собственным LoRA-адаптером (`docker_adapter`) запускается на GPU T4 в Google Colab. Worker обращается к Colab через безопасный HTTPS-туннель ngrok.
+
+```text
+Клиент → FastAPI :8000 → RabbitMQ :5672 → Celery worker
+                                      ↓ HTTPS через ngrok
+                              Google Colab + T4 GPU (vLLM + LoRA)
+```
+
+Локальный компьютер принимает запросы и управляет очередью задач, но не хранит тяжелые веса модели и не выполняет ресурсоемкий инференс.
 
 ## Структура проекта
 
 ```text
 workspace/
-├── main.py                 # FastAPI-приложение
-├── gen_rest_controller.py  # HTTP endpoints
-├── celery_cfg.py           # Конфигурация Celery
-└── worker.py               # Celery-задача
+├── __init__.py
+├── main.py                       # Главное FastAPI-приложение
+├── rest/
+│   └── generator_controller.py   # HTTP-запросы и логика бенчмарка
+├── celery_cfg.py                 # Конфигурация брокера Celery
+├── worker.py                     # Асинхронная Celery-задача
+└── services/
+    ├── ai_service.py             # HTTP-клиент Google Colab через ngrok
+    └── gemini_worker.py          # Gemini-судья пакетной оценки
 Dockerfile
-docker-compose.yml         # RabbitMQ и Celery worker
+docker-compose.yml
 requirements.txt
+eval_report.json                  # Отчёт оценки качества ответов
 ```
 
-## Запуск
+## Описание компонентов проекта
 
-### Вариант 1: Docker Compose
+### 1. Инфраструктура и оркестрация
 
-Запустите RabbitMQ и Celery worker:
+`Dockerfile` и `docker-compose.yml` описывают изоляцию локальной среды, сборку приложения и запуск RabbitMQ, через который асинхронно координируются задачи.
 
-```bash
-docker compose up --build
-```
+`requirements.txt` содержит локальные Python-зависимости: FastAPI, Celery, Pydantic, Requests, Google GenAI SDK и другие.
 
-RabbitMQ Management UI будет доступен по адресу http://localhost:15672.
+### 2. Локальное приложение и задачи (`workspace/`)
 
-Параметры по умолчанию: `guest` / `guest`.
+`main.py` — точка входа локального FastAPI-сервиса. Запускает сервер на порту 8000 и подключает маршруты.
 
-Затем запустите FastAPI локально:
+`rest/generator_controller.py` обрабатывает HTTP-вызовы клиентов. Реализует эндпоинт пакетной оценки `/assesment`, который разбивает датасет на пачки, параллельно ставит задачи в очередь и отправляет их на судейство.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate       # Windows: .venv\\Scripts\\activate
-pip install -r requirements.txt
-uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
-```
+`celery_cfg.py` настраивает подключение Celery к RabbitMQ: `amqp://guest:guest@rabbitmq:5672//`.
 
-При локальном запуске API должен использовать RabbitMQ на `localhost:5672`. Это значение задано по умолчанию в `workspace/celery_cfg.py`.
+`worker.py` содержит фоновую Celery-задачу, которая принимает промпт и передаёт его в облачный сервис.
 
-### Вариант 2: локальный Celery worker
+`services/ai_service.py` выполняет HTTP POST-запросы на публичный ngrok URL Google Colab, где запущена модель.
 
-Если RabbitMQ уже запущен локально, worker можно запустить напрямую:
+`services/gemini_worker.py` отправляет пачки ответов локальной модели в Gemini Flash для объективной оценки по шкале от 1 до 5 с подробным обоснованием.
 
-```bash
-celery -A workspace.celery_cfg:celery_app worker --loglevel=info
-```
+## Порядок запуска системы
 
-## API
+1. Запустите Google Colab, используя второй файл с кодом для Colab, и получите актуальный ngrok URL:
 
-Документация Swagger: http://localhost:8000/docs
+   `https://xxxx.ngrok-free.dev/generate-cloud`
 
-### Создать задачу
+2. Обновите `workspace/services/ai_service.py`, прописав туда полученный ngrok URL.
 
-```bash
-curl -X POST "http://localhost:8000/generate?prompt=a%20new%20key&start=1&end=1000"
-```
+3. Запустите RabbitMQ и worker локально через Docker Compose:
 
-Ответ содержит `task_id`:
+   ```bash
+   docker compose up --build
+   ```
 
-```json
-{
-  "status": "queued",
-  "prompt": "a new key",
-  "task_id": "<task-id>",
-  "detail": "Task has been accepted for processing by Celery worker."
-}
-```
+4. Запустите локальный FastAPI:
 
-### Проверить статус
-
-Подставьте полученный идентификатор задачи:
-
-```bash
-curl "http://localhost:8000/task_status/<task-id>"
-```
-
-Возможные статусы: `Pending`, `completed` и `failed`.
-
-## Переменные окружения
-
-Для подключения к RabbitMQ можно задать URL брокера:
-
-```bash
-export CELERY_BROKER_URL=amqp://guest:guest@localhost:5672//
-```
-
-В Docker Compose worker автоматически использует адрес RabbitMQ-контейнера.
-
-## Проверка
-
-Проверка синтаксиса исходников:
-
-```bash
-python -m compileall workspace
-```
+   ```bash
+   uvicorn workspace.main:app --reload --host 0.0.0.0 --port 8000
+   ```
