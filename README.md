@@ -444,3 +444,135 @@ response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print("\n--- ОТВЕТ ОБУЧЕННОЙ МОДЕЛИ ---")
 print(response)
 ```
+
+
+
+```python
+import os
+import subprocess
+import sys
+import threading
+import time
+import requests
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from pyngrok import ngrok
+
+# === Чистим старые процессы ===
+os.system("pkill -9 -f uvicorn")
+os.system("pkill -9 -f vllm")
+ngrok.kill()
+time.sleep(3)
+
+from google.colab import userdata
+
+NGROK_TOKEN = userdata.get("NGROK_AUTHTOKEN")
+ngrok.set_auth_token(NGROK_TOKEN)
+
+VLLM_PORT = 8001
+WRAPPER_PORT = 5002
+
+base_model_name = "Qwen/Qwen2.5-3B-Instruct"
+adapter_path = "./my_docker_lora_adapter_3b"
+lora_model_id = "docker_adapter"  # Имя, под которым будет доступен адаптер
+
+# === Запуск vLLM с поддержкой LoRA ===
+print(
+    f"⏳ Запускаем vLLM для 3B модели с адаптером на порту {VLLM_PORT}..."
+)
+vllm_process = subprocess.Popen(
+    [
+        "python3",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        base_model_name,
+        "--port",
+        str(VLLM_PORT),
+        "--dtype",
+        "float16",
+        "--enable-lora",  # Включаем поддержку LoRA
+        "--lora-modules",
+        f"{lora_model_id}={adapter_path}",  # Подключаем твой адаптер
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
+)
+
+
+def stream_vllm_logs():
+  for line in vllm_process.stdout:
+    print(f"[vLLM] {line}", end="")
+
+
+threading.Thread(target=stream_vllm_logs, daemon=True).start()
+
+# === Ждём готовности vLLM ===
+start = time.time()
+while time.time() - start < 300:
+  if vllm_process.poll() is not None:
+    print(f"\n❌ vLLM упал с кодом: {vllm_process.returncode}")
+    sys.exit(1)
+  try:
+    r = requests.get(f"http://localhost:{VLLM_PORT}/health", timeout=2)
+    if r.status_code == 200:
+      print(f"\n✅ vLLM готов на порту {VLLM_PORT}!")
+      break
+  except requests.exceptions.ConnectionError:
+    pass
+  time.sleep(5)
+else:
+  print("❌ Таймаут")
+  vllm_process.kill()
+  sys.exit(1)
+
+# === FastAPI wrapper ===
+app = FastAPI(title="Colab AI Wrapper")
+
+
+class GenerationRequest(BaseModel):
+  prompt: str
+  max_new_tokens: int = 512
+
+
+@app.post("/generate-cloud")
+def cloud_generate(req: GenerationRequest):
+  try:
+    response = requests.post(
+        f"http://localhost:{VLLM_PORT}/v1/chat/completions",
+        json={
+            "model": lora_model_id,  # Указываем имя нашего LoRA-модуля
+            "messages": [{"role": "user", "content": req.prompt}],
+            "max_tokens": req.max_new_tokens,
+            "temperature": 0.7,
+        },
+        timeout=60,
+    )
+    if response.status_code != 200:
+      raise Exception(f"vLLM error {response.status_code}: {response.text}")
+
+    answer = response.json()["choices"][0]["message"]["content"]
+    return {"prompt": req.prompt, "response": answer}
+
+  except Exception as e:
+    print("❌ Ошибка:\n", traceback.format_exc())
+    raise HTTPException(status_code=500, detail=str(e))
+
+
+def run_server():
+  uvicorn.run(app, host="0.0.0.0", port=WRAPPER_PORT, log_level="warning")
+
+
+threading.Thread(target=run_server, daemon=True).start()
+time.sleep(2)
+
+# === ngrok туннель ===
+public_url = ngrok.connect(WRAPPER_PORT)
+new_cloud_url = f"{public_url.public_url}/generate-cloud"
+
+print("🚀 Всё запущено!")
+print(f"👉 СКОПИРУЙ В ai_service.py:\n{new_cloud_url}")
+```
