@@ -13,6 +13,7 @@ env/
 .env
 .env.*
 !.env.example
+proprts.env
 
 # Test and coverage artifacts
 .pytest_cache/
@@ -34,7 +35,6 @@ celerybeat-schedule
 
 # ML/cache directories
 .cache/
-models/
 data/
 
 # Local Docker overrides
